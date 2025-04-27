@@ -1,4 +1,4 @@
-# Amazon ML Case Study: End-to-End Solution
+# Amazon ML Case Study: End-to-End Solution (Improved)
 
 ## Case Study: Anomaly Detection for Amazon Fulfillment Centers
 
@@ -9,1397 +9,908 @@ This comprehensive case study demonstrates how to approach a complex ML system d
 Amazon operates hundreds of fulfillment centers worldwide, processing millions of orders daily. Each fulfillment center contains complex machinery such as conveyor systems, sorting equipment, and robotic picking systems. Equipment failures cause significant operational disruptions, leading to delayed shipments and increased costs.
 
 Your task is to design an end-to-end anomaly detection system that can:
-1. Identify potential equipment failures before they occur
-2. Prioritize maintenance activities to minimize disruption
-3. Scale across hundreds of fulfillment centers globally
-4. Improve over time as more data is collected
+1. Identify potential equipment failures before they occur (Predictive Maintenance).
+2. Prioritize maintenance activities to minimize disruption and optimize resource allocation.
+3. Scale across hundreds of fulfillment centers globally.
+4. Improve over time as more data is collected and feedback is incorporated.
 
 ### 1. Problem Analysis & Framing
 
 **Business Impact Assessment:**
-- Each hour of downtime costs approximately $50,000-100,000 per fulfillment center
-- Scheduled maintenance is 70% less costly than emergency repairs
-- Current reactive approach leads to 3-4 major disruptions monthly per facility
-- Maintenance teams are limited resources that need efficient allocation
+- Each hour of downtime costs approximately $50,000-100,000 per fulfillment center (FC).
+- Scheduled maintenance is estimated to be ~70% less costly than emergency repairs (including downtime cost).
+- Current reactive approach leads to an average of 3-4 major disruptions monthly per facility.
+- Maintenance teams are limited resources; efficient allocation is crucial.
+- Goal: Reduce unplanned downtime by X% (e.g., 30% in Year 1), reduce maintenance costs by Y% (e.g., 15% in Year 1).
+- ROI calculation: For 100 FCs, reducing downtime by 2 hours per month could save $120-240M annually.
 
 **ML Problem Formulation:**
-- Primary task: Multi-variate time series anomaly detection
-- Secondary task: Anomaly severity classification and remaining useful life prediction
-- Input data: Sensor readings, operational metrics, maintenance logs
-- Output: Anomaly scores, failure probability, recommended maintenance timing
+- **Primary task:** Multi-variate time series anomaly detection. Detect deviations from normal operating behavior based on sensor data.
+- **Secondary tasks:**
+    - Anomaly severity classification (e.g., low, medium, high risk).
+    - Remaining Useful Life (RUL) prediction for critical components (regression task).
+    - Failure mode classification (multi-class classification, requires labeled data).
+- **Input data:** Sensor readings (time series), operational metrics, maintenance logs (structured and unstructured), equipment metadata.
+- **Output:** Anomaly scores/flags, estimated failure probability/RUL, recommended maintenance actions and timing, severity level.
 
-**Key Constraints:**
-- Low false positive tolerance (maintenance is costly but less than failures)
-- Real-time or near-real-time detection requirements (minutes, not hours)
-- Heterogeneous equipment across facilities (different manufacturers, ages, configurations)
-- Limited labeled failure data, but abundant normal operation data
-- Edge computing capabilities at some locations, cloud connectivity at all
+**Key Constraints & Considerations:**
+- **Low false positive tolerance:** Alerting maintenance teams unnecessarily is costly and erodes trust. However, missing a true failure (false negative) is even more costly. Need to balance Precision and Recall based on business cost.
+- **Latency:** Near-real-time detection needed (minutes, not hours) to allow for intervention.
+- **Scalability:** Solution must scale to hundreds of FCs with potentially thousands of monitored assets each.
+- **Heterogeneity:** Equipment varies across FCs (manufacturers, age, sensors, operating conditions). Models need to generalize or adapt.
+- **Data Availability:** Limited labeled failure data (failures are rare events), but abundant normal operation data. Maintenance logs might be noisy or incomplete.
+- **Environment:** Industrial environment (noisy sensors, potential connectivity issues).
+- **Deployment:** Mix of edge computing capabilities (some FCs) and reliable cloud connectivity (all FCs).
+
+**Assumptions Made:**
+- Basic sensor infrastructure (or willingness to invest) exists or can be deployed.
+- Network connectivity between edge gateways and AWS cloud is generally available, with mechanisms to handle temporary outages.
+- Maintenance teams are willing to adopt and provide feedback on an ML-driven system.
+- Sufficient computational resources (Edge/Cloud) can be provisioned.
+- Data privacy/security protocols are adhered to for sensor and operational data.
+- Executive stakeholders have approved the initial POC funding for a select number of FCs.
+- Existing maintenance workflows can be integrated with or extended to include ML-driven alerts.
 
 ### 2. Data Strategy
 
 **Data Sources:**
 
-1. Equipment sensor data:
-   - Vibration sensors (3-axis accelerometers at 1KHz)
-   - Temperature readings (sampled every 30 seconds)
-   - Power consumption (amperage, voltage, sampled every second)
-   - Motor speed, torque, and load metrics
-   - Acoustic sensors (microphones near critical components)
+1.  **Equipment Sensor Data:**
+    *   Vibration (e.g., 3-axis accelerometers, 1KHz sampling) - Key for mechanical wear.
+    *   Temperature (e.g., motor casing, bearings, ambient, sampled every 30s).
+    *   Power Consumption (e.g., current, voltage, power factor, sampled every 1s).
+    *   Acoustic (e.g., microphones near critical components, high frequency).
+    *   Operational Parameters (e.g., motor speed, torque, load, belt speed).
+    *   Other relevant sensors (e.g., pressure, flow rate for hydraulic/pneumatic systems).
 
-2. Operational data:
-   - Throughput metrics (items processed per hour)
-   - Equipment duty cycles and operating schedules
-   - Environmental conditions (humidity, ambient temperature)
-   - Operational mode changes (startup, shutdown, speed changes)
+2.  **Operational Data:**
+    *   Throughput (items/hour).
+    *   Equipment state (on/off, idle, running speed, startup/shutdown sequences).
+    *   Operating schedules.
+    *   Environmental conditions (ambient temperature, humidity in the FC).
+    *   Inventory levels and processing demands (peak vs. normal periods).
 
-3. Maintenance records:
-   - Historical maintenance logs and repair records
-   - Component replacement history
-   - Prior failure reports with root cause analysis
-   - Technician notes and observations (unstructured text)
+3.  **Maintenance Records:**
+    *   Historical work orders (scheduled maintenance, repairs).
+    *   Failure reports (dates, component, description, root cause if available).
+    *   Component replacement history.
+    *   Technician notes (unstructured text - potential for NLP).
+    *   Time-to-repair metrics and downtime impact records.
 
-4. Equipment metadata:
-   - Equipment specifications and expected operating parameters
-   - Manufacturer recommended maintenance schedules
-   - Equipment age, service history, and known issues
-   - Component hierarchies and dependencies
+4.  **Equipment Metadata:**
+    *   Manufacturer, model, age, installation date.
+    *   Specifications, expected operating ranges.
+    *   Maintenance manuals/schedules.
+    *   Component hierarchy (e.g., motor M1 is part of conveyor C5).
+    *   Previous retrofits or modifications.
 
 **Data Collection Architecture:**
 
 ```
-[Sensors] → [Edge Gateways] → [Kafka Streams] → [Data Lake (S3)]
-                    ↓                ↓
-        [Edge Processing]    [Real-time Analytics]
-                    ↓                ↓
-             [Local Alerts]    [Global Model]
+[Sensors] → [PLCs/Edge Gateways (AWS IoT Greengrass)] → [AWS IoT Core / Kinesis Data Streams] → [Data Lake (S3)] 
+    |                     |                                        |
+[Edge Processing]  [Real-time Analytics]                 [Batch Processing]
+(Greengrass ML)    (Kinesis Analytics)                     (Glue/EMR)
+    |                     |                                        |
+[Local Alerts]    [Feature Store]                       [Model Training]
+                (SageMaker FS)                         (SageMaker)
+                      |                                         |
+                      └─────────────[Monitoring]───────────────┘
+                                    (CloudWatch)
 ```
 
 **Feature Engineering:**
 
-1. Time-domain features:
-   - Statistical moments (mean, variance, skewness, kurtosis)
-   - Percentile values (P10, P50, P90)
-   - Rate of change metrics (derivatives, integrals)
-   - Peak-to-peak amplitudes and crest factors
+1.  **Time-domain features (rolling windows):**
+    *   Statistics: Mean, median, std dev, variance, skewness, kurtosis.
+    *   Range/Amplitude: Peak-to-peak, RMS, crest factor.
+    *   Trend: Rate of change (slope), integrals.
+    *   Anomaly metrics: Z-score, modified z-score, IQR distances.
 
-2. Frequency-domain features:
-   - FFT coefficients for vibration data
-   - Power spectral density characteristics
-   - Predominant frequencies and harmonics
-   - Wavelet transform coefficients for transient detection
+2.  **Frequency-domain features (FFT/Wavelets on vibration/acoustic):**
+    *   Spectral power in specific bands.
+    *   Dominant frequencies and harmonics.
+    *   Spectral entropy, centroid.
+    *   Wavelet coefficients for transient detection.
+    *   Fault-specific frequency patterns (e.g., bearing fault frequencies).
 
-3. Contextual features:
-   - Operational state indicators (normal, startup, high-load)
-   - Time since last maintenance
-   - Component age relative to expected lifetime
-   - Deviation from manufacturer specifications
+3.  **Contextual features:**
+    *   Time since last maintenance/failure.
+    *   Equipment age / cycles completed.
+    *   Current operational state (derived from operational data).
+    *   Deviation from normal operating parameters (metadata vs. real-time).
+    *   Environmental factors (ambient temp/humidity).
+    *   Operational load level (percentage of maximum capacity).
 
-4. Derived sensor fusion features:
-   - Cross-sensor correlations
-   - Physics-based derived metrics (e.g., efficiency calculations)
-   - Residuals from expected behavior models
+4.  **Cross-sensor features:**
+    *   Correlations between sensors (e.g., vibration vs. temperature).
+    *   Physics-informed features (e.g., efficiency = output power / input power).
+    *   Residuals from simple physics-based models.
+    *   Sensor consistency checks (redundancy validation).
 
-**Data Pipeline Implementation:**
+5.  **Maintenance Log Features (NLP on technician notes):**
+    *   Keywords related to failure modes (e.g., "bearing noise", "overheating").
+    *   Sentiment analysis (potentially indicates severity).
+    *   Named entity recognition for equipment components.
+    *   Historical repair frequency and patterns.
 
-1. Sensor data ingestion:
-   - OPC-UA and MQTT protocols for industrial equipment
-   - Local buffering for network interruptions
-   - Data validation and compression at source
+**Data Pipeline Implementation (using AWS services):**
 
-2. Preprocessing:
-   - Noise filtering and outlier detection
-   - Missing value imputation strategies
-   - Normalization and standardization
-   - Time series alignment across sensors
+1.  **Ingestion:** 
+    * AWS IoT Core for MQTT messages from gateways, with topic structures based on facility/equipment hierarchy.
+    * Kinesis Data Streams for high-throughput streaming with enhanced fan-out for multiple consumers.
+    * AWS IoT SiteWise for industrial equipment data collection with built-in asset modeling.
+    * Gateways running AWS IoT Greengrass perform initial filtering/aggregation.
+    * Data quality validation at ingestion with AWS Lambda triggers.
 
-3. Feature store:
-   - Online features for real-time inference
-   - Offline features for model training
-   - Feature versioning and lineage tracking
-   - Automated feature quality monitoring
+2.  **Storage:** 
+    * Raw data stored in S3 Data Lake (partitioned by date, FC, equipment ID) with intelligent tiering for cost optimization.
+    * Data lifecycle policies to transition older data to S3 Glacier for cost-effective long-term storage.
+    * Processed features stored in SageMaker Feature Store for efficient access.
+    * AWS Lake Formation for centralized permission management and governance.
+    * AWS Glue Data Catalog for unified metadata repository.
 
-4. Data quality assurance:
-   - Automated drift detection for sensor calibration
-   - Schema validation and constraint checking
-   - Alerting for data pipeline failures
-   - Data profiling and statistical quality monitoring
+3.  **Preprocessing & Feature Extraction:**
+    *   **Real-time:** Kinesis Data Analytics (Flink) or Lambda functions triggered by Kinesis.
+        ```python
+        # Example Kinesis Data Analytics preprocessing application (pseudo-code)
+        def preprocessing_udf(kinesis_stream):
+            # Extract and validate sensor readings
+            for record in kinesis_stream:
+                # Parse JSON payload
+                payload = json.loads(record)
+                equipment_id = payload.get('equipment_id')
+                sensor_readings = payload.get('readings', {})
+                
+                # Apply filtering to remove noise (simple example)
+                filtered_readings = {}
+                for sensor_id, values in sensor_readings.items():
+                    # Apply Kalman filter or moving average
+                    filtered_values = apply_filter(values)
+                    # Check for invalid readings and apply bounds
+                    filtered_values = apply_bounds_check(filtered_values, 
+                                                       get_sensor_bounds(sensor_id))
+                    filtered_readings[sensor_id] = filtered_values
+                
+                # Extract time-domain features
+                time_features = extract_time_features(filtered_readings)
+                
+                # Extract frequency-domain features for vibration sensors
+                freq_features = {}
+                for sensor_id, values in filtered_readings.items():
+                    if is_vibration_sensor(sensor_id):
+                        freq_features[sensor_id] = extract_frequency_features(values)
+                
+                # Combine features and output
+                output = {
+                    'equipment_id': equipment_id,
+                    'timestamp': payload.get('timestamp'),
+                    'time_features': time_features,
+                    'freq_features': freq_features,
+                    'raw_filtered': filtered_readings
+                }
+                
+                yield json.dumps(output)
+        ```
+    *   **Batch:** AWS Glue jobs or EMR (Spark) for large historical datasets.
+        * Custom ETL with Spark for feature extraction from historical data
+        * Scheduled jobs for daily/weekly feature recalculation
+        * Deequ for automated data quality validation
+
+4.  **Feature Store:** Amazon SageMaker Feature Store for both online (real-time inference) and offline (training) features. 
+    * Ensures consistency and manages feature lineage.
+    * Feature groups organized by equipment type and feature categories
+    * Time-travel capability to retrieve features as of a specific point in time
+    * Realtime feature serving for low-latency inference
+
+5.  **Data Quality:** 
+    * AWS Glue Data Quality or Deequ on EMR/Glue for automated checks 
+    * Schema validation, drift detection, completeness checks
+    * CloudWatch alarms for pipeline failures or data quality issues
+    * Amazon SageMaker Model Monitor for detecting feature drift
 
 ### 3. Model Development Approach
 
 **Modeling Strategy:**
 
-1. Hierarchical approach:
-   - Equipment-level models for specific failure modes
-   - System-level models for interaction effects
-   - Facility-level models for environmental factors
+1.  **Hierarchical:**
+    *   Component-level models (e.g., specific motor bearing).
+    *   Equipment-level models (e.g., entire conveyor section).
+    *   System-level models (interactions between equipment).
+    *   Common patterns across similar equipment types in different FCs.
 
-2. Multi-stage modeling:
-   - Stage 1: Anomaly detection (unsupervised)
-   - Stage 2: Anomaly classification (semi-supervised)
-   - Stage 3: Remaining useful life prediction (supervised)
+2.  **Multi-stage:**
+    *   **Stage 1: Anomaly Detection (Unsupervised/Semi-supervised):** Identify *any* deviation from normal. Train primarily on normal data. High recall desired initially.
+        *   Algorithms: Statistical methods (IQR, Z-score on features), Isolation Forest, One-Class SVM, Autoencoders (LSTM-AE, TCN-AE), VAEs.
+        *   Selection criteria: Start with simpler algorithms for interpretability, move to deep learning when necessary for complex patterns.
+    *   **Stage 2: Anomaly Classification/Scoring (Supervised/Semi-supervised):** Classify detected anomalies by severity or potential failure mode. Requires some labeled data (historical failures, technician feedback).
+        *   Algorithms: Use anomaly reconstruction error/score, train classifiers (e.g., XGBoost, LightGBM, simple NN) on features extracted around the anomaly window, potentially using labels from maintenance logs. Active learning to prioritize labeling.
+        *   Leverage Amazon SageMaker's built-in algorithms (Random Cut Forest, XGBoost) and custom containers for specialized models.
+    *   **Stage 3: RUL Prediction (Supervised):** Predict time-to-failure for specific components/modes. Requires run-to-failure data or degradation signals.
+        *   Algorithms: Survival analysis models, LSTMs, Transformers trained on sequences leading up to known failures.
+        *   Probabilistic outputs (distribution of failure times) rather than single-point estimates.
 
-**Algorithms Selection:**
+**Algorithms Selection Rationale:**
 
-1. Unsupervised baseline models:
-   - Statistical control charts for univariate signals
-   - One-class SVM for multivariate patterns
-   - Isolation Forests for outlier detection
-   - Autoencoders for representation learning
+*   **Start Simple:** Begin with statistical methods and tree-based ensembles (Isolation Forest) for baselines – interpretable, fast.
+    ```python
+    # Example: Statistical anomaly detection baseline
+    def statistical_baseline(time_series, window_size=20, threshold=3.0):
+        """
+        Simple rolling z-score anomaly detection
+        
+        Args:
+            time_series: Array of sensor readings
+            window_size: Size of rolling window
+            threshold: Number of standard deviations to consider anomalous
+            
+        Returns:
+            Array of anomaly scores (z-scores) and binary anomaly flags
+        """
+        # Calculate rolling mean and std
+        rolling_mean = np.convolve(time_series, 
+                                   np.ones(window_size)/window_size, 
+                                   mode='valid')
+        
+        # Pad beginning values with first calculated value
+        padding = np.repeat(rolling_mean[0], window_size-1)
+        rolling_mean = np.concatenate([padding, rolling_mean])
+        
+        # Calculate rolling std with similar padding
+        rolling_std = []
+        for i in range(len(time_series) - window_size + 1):
+            std = np.std(time_series[i:i+window_size])
+            rolling_std.append(std)
+        
+        rolling_std = np.concatenate([
+            np.repeat(rolling_std[0], window_size-1),
+            np.array(rolling_std)
+        ])
+        
+        # Handle division by zero
+        rolling_std = np.where(rolling_std == 0, 0.0001, rolling_std)
+        
+        # Calculate z-scores
+        z_scores = np.abs((time_series - rolling_mean) / rolling_std)
+        
+        # Generate anomaly flags
+        anomalies = z_scores > threshold
+        
+        return z_scores, anomalies
+    ```
 
-2. Advanced anomaly detection:
-   - Temporal convolutional networks for time-series
-   - LSTM-based encoders with reconstruction objectives
-   - Variational autoencoders for probabilistic modeling
-   - Transformer-based models for long-range dependencies
+*   **Deep Learning for Temporal Patterns:** Autoencoders (LSTM, TCN, Transformer variants) are powerful for learning complex temporal dependencies in multivariate sensor data without labels. Reconstruction error serves as anomaly score. VAEs provide probabilistic outputs.
+*   **Handling Limited Labels:** Semi-supervised approaches (e.g., train AE on normal data, use reconstruction error), active learning (query technicians on uncertain anomalies), transfer learning (pre-train on similar equipment with more data).
+*   **Federated Learning:** Consider for privacy or cross-facility learning without centralizing raw data (though likely less critical if data is centrally owned by Amazon).
+*   **Algorithm Decision Framework:**
 
-3. Supervised/semi-supervised approaches:
-   - Transfer learning from similar equipment
-   - Few-shot learning for rare failure modes
-   - Active learning to prioritize labeling efforts
-   - Federated learning across facilities
+| Algorithm | Pros | Cons | Best Use Case | AWS Implementation |
+|-----------|------|------|---------------|-------------------|
+| Statistical Methods | Fast, interpretable, no training | Simplistic, struggles with multivariate | Initial baseline, simple sensors | Lambda functions |
+| Isolation Forest | Handles high-dimensional data, fast | Less effective with temporal patterns | Quick deployment, limited data | SageMaker built-in |
+| One-Class SVM | Effective for medium datasets | Slow on large datasets, parameter tuning | Well-defined normal behavior | SageMaker custom containers |
+| LSTM Autoencoder | Captures temporal dependencies | Training time, black box | Complex time series, sufficient data | SageMaker PyTorch/TensorFlow |
+| Random Cut Forest | Online learning, streaming-friendly | May miss subtle anomalies | Streaming data, continual updating | SageMaker built-in |
 
-**Model Implementation Details:**
+**Model Implementation Details (Conceptual):**
 
-1. Anomaly detection model:
-   ```python
-   def create_temporal_autoencoder(seq_length, n_features):
-       # Input layer
-       inputs = Input(shape=(seq_length, n_features))
-       
-       # Encoder
-       x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
-       x = MaxPooling1D(pool_size=2)(x)
-       x = Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(x)
-       x = MaxPooling1D(pool_size=2)(x)
-       
-       # Bottleneck
-       encoded = Conv1D(filters=16, kernel_size=3, padding='same', activation='relu')(x)
-       
-       # Decoder
-       x = Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(encoded)
-       x = UpSampling1D(size=2)(x)
-       x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(x)
-       x = UpSampling1D(size=2)(x)
-       
-       # Output layer
-       outputs = Conv1D(filters=n_features, kernel_size=3, padding='same')(x)
-       
-       # Create model
-       model = Model(inputs=inputs, outputs=outputs)
-       model.compile(optimizer='adam', loss='mse')
-       
-       return model
-   
-   # Anomaly scoring function
-   def compute_anomaly_score(model, sequence, threshold_multiplier=3.0):
-       reconstruction = model.predict(np.expand_dims(sequence, axis=0))[0]
-       errors = np.mean(np.square(sequence - reconstruction), axis=1)
-       anomaly_scores = errors / np.std(errors)
-       anomaly_threshold = threshold_multiplier * np.median(anomaly_scores)
-       return anomaly_scores, anomaly_threshold
-   ```
+1.  **Anomaly Detection (Temporal Autoencoder Example):**
+    ```python
+    # Using TensorFlow/Keras
+    from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, UpSampling1D, LSTM, RepeatVector, TimeDistributed, Dense
+    from tensorflow.keras.models import Model
+    import numpy as np
 
-2. Remaining useful life prediction:
-   ```python
-   def create_rul_predictor(seq_length, n_features):
-       # Feature extraction backbone
-       inputs = Input(shape=(seq_length, n_features))
-       x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
-       x = MaxPooling1D(pool_size=2)(x)
-       x = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(x)
-       x = MaxPooling1D(pool_size=2)(x)
-       
-       # LSTM for temporal dynamics
-       x = Bidirectional(LSTM(64, return_sequences=True))(x)
-       x = Bidirectional(LSTM(32, return_sequences=False))(x)
-       
-       # Dense layers for prediction
-       x = Dense(64, activation='relu')(x)
-       x = Dropout(0.3)(x)
-       x = Dense(32, activation='relu')(x)
-       
-       # Output layers for different tasks
-       rul_output = Dense(1, name='rul')(x)  # Regression task
-       failure_prob = Dense(1, activation='sigmoid', name='failure_prob')(x)  # Binary classification
-       failure_mode = Dense(n_failure_modes, activation='softmax', name='failure_mode')(x)  # Multi-class
-       
-       # Multi-task model
-       model = Model(inputs=inputs, outputs=[rul_output, failure_prob, failure_mode])
-       
-       # Custom loss weights for different tasks
-       model.compile(
-           optimizer='adam',
-           loss={
-               'rul': 'mse',
-               'failure_prob': 'binary_crossentropy',
-               'failure_mode': 'categorical_crossentropy'
-           },
-           loss_weights={
-               'rul': 1.0,
-               'failure_prob': 0.5,
-               'failure_mode': 0.3
-           }
-       )
-       
-       return model
-   ```
+    def create_lstm_autoencoder(seq_length, n_features):
+        inputs = Input(shape=(seq_length, n_features))
+        # Encoder: Learn compressed representation
+        encoded = LSTM(128, activation='relu', return_sequences=True)(inputs)
+        encoded = LSTM(64, activation='relu', return_sequences=False)(encoded) # Bottleneck
+        # Repeat vector to feed into decoder
+        repeat_vec = RepeatVector(seq_length)(encoded)
+        # Decoder: Reconstruct original sequence
+        decoded = LSTM(64, activation='relu', return_sequences=True)(repeat_vec)
+        decoded = LSTM(128, activation='relu', return_sequences=True)(decoded)
+        outputs = TimeDistributed(Dense(n_features))(decoded) # Output layer matches input features
+
+        model = Model(inputs=inputs, outputs=outputs)
+        model.compile(optimizer='adam', loss='mse') # Mean Squared Error for reconstruction loss
+        return model
+
+    # Anomaly Scoring: High reconstruction error indicates anomaly
+    def compute_anomaly_score(model, sequence):
+        # sequence shape: (1, seq_length, n_features)
+        reconstruction = model.predict(sequence)
+        # Calculate feature-wise MSE
+        mse_per_feature = np.mean(np.power(sequence - reconstruction, 2), axis=1)
+        # Calculate overall MSE
+        mse = np.mean(mse_per_feature, axis=1)
+        return mse[0], mse_per_feature[0] # Return overall score and feature-wise scores
+    ```
+    *   *Choice Rationale:* LSTMs are suitable for capturing temporal dependencies. Autoencoders learn a compressed representation of "normal" behavior; deviations result in high reconstruction error (MSE). Feature-wise errors help with interpretability.
+
+2.  **RUL Prediction (Multi-task Example):**
+    ```python
+    # Using TensorFlow/Keras
+    from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Bidirectional, LSTM, Dense, Dropout
+    from tensorflow.keras.models import Model
+
+    def create_rul_predictor(seq_length, n_features, n_failure_modes):
+        inputs = Input(shape=(seq_length, n_features))
+        # Feature extraction using Conv1D
+        x = Conv1D(filters=64, kernel_size=7, padding='same', activation='relu')(inputs)
+        x = MaxPooling1D(pool_size=2)(x)
+        x = Conv1D(filters=128, kernel_size=5, padding='same', activation='relu')(x)
+        x = MaxPooling1D(pool_size=2)(x)
+        # Temporal modeling using Bi-LSTM
+        x = Bidirectional(LSTM(64, return_sequences=True))(x)
+        x = Bidirectional(LSTM(32, return_sequences=False))(x) # Get final state
+        # Dense layers for prediction heads
+        x = Dense(64, activation='relu')(x)
+        x = Dropout(0.3)(x) # Dropout for regularization - prevents overfitting
+        x = Dense(32, activation='relu')(x)
+
+        # Output heads for multi-task learning
+        rul_output = Dense(1, name='rul')(x) # Regression: Remaining Useful Life
+        failure_prob = Dense(1, activation='sigmoid', name='failure_prob')(x) # Binary Classification: High failure risk soon?
+        failure_mode = Dense(n_failure_modes, activation='softmax', name='failure_mode')(x) # Multi-class Classification
+
+        model = Model(inputs=inputs, outputs=[rul_output, failure_prob, failure_mode])
+        # Compile with different losses and weights per task
+        model.compile(
+            optimizer='adam',
+            loss={'rul': 'mse', 'failure_prob': 'binary_crossentropy', 'failure_mode': 'categorical_crossentropy'},
+            loss_weights={'rul': 1.0, 'failure_prob': 0.5, 'failure_mode': 0.3}, # Tune weights based on importance
+            metrics={'rul': 'mae', 'failure_prob': 'accuracy', 'failure_mode': 'accuracy'}
+        )
+        return model
+    ```
+    *   *Choice Rationale:* CNN layers extract spatial features across sensors within a time step, Bi-LSTMs capture temporal patterns in both directions. Multi-task learning allows sharing representations, potentially improving performance on related tasks (RUL, failure probability, mode) especially with limited labels for some tasks. Dropout adds regularization to prevent overfitting.
 
 **Training Methodology:**
 
-1. Training data strategy:
-   - Historical failure data augmented with synthetic examples
-   - Normal operation data with controlled variations
-   - Domain adaptation between equipment types
-   - Curriculum learning from simple to complex patterns
+1.  **Data Strategy:**
+    *   **Anomaly Detection:** Train primarily on data known to be normal (long periods without failures, outside maintenance windows). Use techniques like contamination training if some anomalies might be present.
+    *   **Classification/RUL:** Use labeled historical data. Augment with synthetic data (e.g., SMOTE for classification, physics-based simulations, or generative models if feasible) due to imbalance. Use data from similar equipment via transfer learning.
+    *   **Training/Validation/Test Split:** Use time-based splitting to prevent data leakage (future information shouldn't be used for predicting past events).
 
-2. Evaluation framework:
-   - Time-based cross-validation to prevent data leakage
-   - Precision-recall AUC for imbalanced detection tasks
-   - Time-to-detection metrics (earlier is better)
-   - False positive rate monitoring with business cost model
+2.  **Evaluation Framework:**
+    *   **Anomaly Detection:** Precision, Recall, F1-score (tune threshold based on cost matrix), AUC-ROC, PR-AUC (better for imbalance). Time-based cross-validation (train on past, test on future) is crucial. Evaluate time-to-detection.
+    *   **RUL:** Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), scoring functions considering early/late predictions (early prediction is better than late).
+    *   **Classification:** Accuracy, Precision/Recall/F1 per class, Confusion Matrix, business impact metrics (cost of false positives vs. false negatives).
+    *   **Business Metrics:** Cost savings from prevented downtime, reduction in emergency maintenance, maintenance staff efficiency.
 
-3. Transfer learning approach:
-   - Pre-train on abundant equipment types
-   - Fine-tune on limited data equipment
-   - Zero-shot adaptation for new equipment
-   - Meta-learning for few-shot adaptation
+3.  **Transfer Learning:** Pre-train models on data-rich equipment types or simulated data. Fine-tune on specific equipment/FCs with limited data. Use techniques like domain adaptation.
+    ```python
+    # Example of transfer learning approach (pseudo-code)
+    # 1. Pre-train on source domain (data-rich equipment)
+    source_model = train_autoencoder(source_data)
+    
+    # 2. Fine-tune on target domain (limited data equipment)
+    # Initialize with source model weights
+    target_model = create_autoencoder_with_same_architecture()
+    target_model.set_weights(source_model.get_weights())
+    
+    # Fine-tune with target data (potentially freezing early layers)
+    for layer in target_model.layers[:freeze_layer_index]:
+        layer.trainable = False
+    
+    target_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                         loss='mse')
+    target_model.fit(target_data, target_data, ...)
+    ```
 
-4. Hyperparameter optimization:
-   - Bayesian optimization for key parameters
-   - Multi-objective optimization (accuracy vs. latency)
-   - Automated ML for feature selection
-   - Model compression for edge deployment
+4.  **Hyperparameter Optimization:** Use SageMaker Automatic Model Tuning (Bayesian optimization) to find optimal parameters (learning rate, layer sizes, regularization, window sizes).
+    ```python
+    # Example SageMaker Hyperparameter Tuning configuration
+    hyperparameter_ranges = {
+        "learning_rate": ContinuousParameter(0.0001, 0.1, scaling_type="logarithmic"),
+        "batch_size": CategoricalParameter([32, 64, 128, 256]),
+        "lstm_hidden_units": CategoricalParameter([32, 64, 128]),
+        "dropout_rate": ContinuousParameter(0.1, 0.5),
+        "window_size": CategoricalParameter([20, 50, 100, 200])
+    }
+    
+    tuner = HyperparameterTuner(
+        estimator=estimator,
+        objective_metric_name="validation:loss",
+        hyperparameter_ranges=hyperparameter_ranges,
+        metric_definitions=[
+            {"Name": "validation:loss", "Regex": "validation loss: ([0-9\\.]+)"}
+        ],
+        max_jobs=20,
+        max_parallel_jobs=5,
+        strategy="Bayesian"
+    )
+    ```
+
+5.  **Model Compression/Quantization:** For edge deployment, use techniques like weight pruning, quantization (e.g., TensorFlow Lite, ONNX Runtime quantization) to reduce model size and latency while minimizing accuracy loss.
+    * SageMaker Neo for optimizing models for different device targets
+    * Quantization-aware training for minimal accuracy loss
+    * Pruning to remove redundant weights
+
+6.  **Experiment Tracking:**
+    * Use SageMaker Experiments to track model iterations, hyperparameters, and performance metrics
+    * Maintain model lineage and experiment history
+    * Compare experiment results with business metrics
 
 ### 4. System Architecture
 
 **Overall System Design:**
 
 ```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│  Data Pipeline  │──────▶  Model Training │──────▶ Model Registry  │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
-         │                       │                        │
-         ▼                       ▼                        ▼
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│ Feature Store   │◀─────▶ Inference Engine│◀─────▶ Model Deployment│
-└─────────────────┘      └─────────────────┘      └─────────────────┘
-         │                       │                        │
-         └───────────────┬───────┘                        │
-                         ▼                                │
-                 ┌─────────────────┐                      │
-                 │ Alert Manager   │◀─────────────────────┘
-                 └─────────────────┘
-                         │
-                         ▼
-                 ┌─────────────────┐
-                 │ Maintenance     │
-                 │ Optimization    │
-                 └─────────────────┘
+┌──────────────────────────┐      ┌──────────────────────────┐      ┌──────────────────────────┐
+│ Data Ingestion & Pipeline│──────▶│ Model Training & Tuning │──────▶│ Model Registry          │
+│ (IoT, Kinesis, Glue, S3) │      │ (SageMaker Training Jobs)│      │ (SageMaker Model Registry)
+└─────────────┬────────────┘      └────────────┬─────────────┘      └────────────┬─────────────┘
+              │                                 │                                 │
+              ▼                                 ▼                                 ▼
+┌──────────────────────────┐      ┌──────────────────────────┐      ┌─────────────────────────┐
+│ Feature Store            │◀─────▶│ Inference Engine        │◀─────▶│ Model Deployment       │
+│ (SageMaker Feature Store)│      │ (SageMaker Endpoints/Edge)│      │ (SageMaker/Greengrass) │
+└─────────────┬────────────┘      └────────────┬─────────────┘      └────────────┬────────────┘
+              │                                 │                                 │
+              └─────────────────┬───────────────┘                                 │
+                                ▼                                                 │
+                    ┌──────────────────────────┐                                  │
+                    │ Alerting & Monitoring    │◀────────────────────────────────┘
+                    │ (CloudWatch, SNS, Lambda)│
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
+                    │ Maintenance Optimization │
+                    │ (Decision Support System)│
+                    └──────────────────────────┘
 ```
 
 **Edge-Cloud Hybrid Architecture:**
 
-1. Edge components:
-   - Sensor data acquisition and validation
-   - Local feature extraction and preprocessing
-   - Lightweight anomaly detection models
-   - Critical alerts generation with low latency
-   - Local data buffering for connectivity issues
+1.  **Edge Components (AWS IoT Greengrass on Gateways/Local Servers):**
+    *   Data acquisition, validation, local buffering.
+    *   Basic feature extraction (e.g., rolling stats).
+    *   Lightweight anomaly detection models (e.g., statistical, small quantized NN) for low-latency critical alerts.
+    *   Trigger local actions (e.g., indicator light).
+    *   Securely forward data/alerts to the cloud.
+    *   Resilient operation during connectivity outages.
+    *   AWS IoT Device Defender for security monitoring.
 
-2. Cloud components:
-   - Centralized model training and evaluation
-   - Cross-facility pattern identification
-   - Model versioning and deployment management
-   - Complex analytics and remaining life prediction
-   - Integration with maintenance planning systems
+2.  **Cloud Components (AWS):**
+    *   **Data Lake & Processing:** 
+        * S3 for scalable storage with lifecycle policies
+        * Glue for ETL and data cataloging
+        * EMR for distributed processing
+        * Kinesis for real-time streaming
+        * AWS Lake Formation for data governance
+    *   **Feature Store:** SageMaker Feature Store for consistent feature access and lineage tracking.
+    *   **Model Training:** 
+        * SageMaker Training Jobs with distributed training for large models
+        * SageMaker Experiments for experiment tracking
+        * SageMaker Debugger for model optimization
+        * SageMaker HPO for hyperparameter tuning
+    *   **Model Hosting:** 
+        * SageMaker Endpoints with auto-scaling for real-time inference
+        * SageMaker Batch Transform for offline processing
+        * SageMaker Multi-Model Endpoints for efficient hosting of many models
+    *   **Monitoring & Alerting:** 
+        * CloudWatch for metrics, logs, and alarms
+        * SNS for notifications with filtering capabilities
+        * Lambda for alert processing and business logic
+        * EventBridge for event-driven architecture
+    *   **Orchestration:** 
+        * Step Functions for ML workflows
+        * Managed Workflows for Apache Airflow
+    *   **Analytics & Dashboarding:** 
+        * QuickSight for business analytics
+        * Grafana for technical monitoring
+        * Athena for ad-hoc queries
+    *   **Maintenance Integration:** 
+        * API Gateway/Lambda to integrate with existing maintenance systems (e.g., SAP, Maximo)
+        * AppFlow for SaaS integration
 
-3. Communication patterns:
-   - Real-time streaming for critical metrics
-   - Batch uploads for high-volume/frequency data
-   - Model updates pushed to edge devices
-   - Federated learning for privacy-sensitive data
+3.  **Communication:** 
+    * MQTT via IoT Core with topic-based filtering
+    * Kinesis Data Streams for high-throughput streaming
+    * Greengrass Stream Manager for reliable edge-to-cloud streaming with offline capabilities
+    * SiteWise Edge for industrial protocol translation
+    * VPC endpoints and PrivateLink for secure communication
 
 **Deployment Strategy:**
 
-1. Model serving:
-   - TensorFlow Serving for cloud models
-   - ONNX Runtime for cross-platform edge deployment
-   - Model quantization for edge (int8 precision)
-   - Model versioning and A/B testing capability
+1.  **Model Serving:**
+    *   **Cloud:** 
+        * SageMaker Endpoints with auto-scaling for real-time predictions
+        * Multi-model endpoints for equipment-specific models
+        * Inference pipelines for preprocessing + inference
+        * Model latency monitoring and optimization
+    *   **Edge:** 
+        * AWS IoT Greengrass deployments with component-based architecture
+        * Container-based deployment for versioning and isolation
+        * ONNX runtime for cross-platform compatibility
+        * SageMaker Neo for hardware-specific optimization
 
-2. Inference optimization:
-   - Batched inference for efficiency
-   - Early-exit models for tiered prediction
-   - Adaptive sampling rates based on equipment state
-   - Distributed inference across edge and cloud
+2.  **A/B Testing / Experimentation:**
+    *   Use SageMaker Endpoints with production variants for canary releases or A/B testing new models. Route a fraction of traffic (e.g., from specific equipment or FCs) to the new model.
+    *   Monitor performance metrics (technical and business) for both variants before full rollout.
+    *   Shadow deployment: Deploy new model alongside the old one, compare predictions without acting on the new model's output initially.
+    ```json
+    // Example SageMaker production variant configuration for A/B testing
+    {
+      "ProductionVariants": [
+        {
+          "VariantName": "ExistingModel",
+          "ModelName": "anomaly-detection-model-v1",
+          "InitialInstanceCount": 1,
+          "InstanceType": "ml.c5.large",
+          "InitialVariantWeight": 80
+        },
+        {
+          "VariantName": "NewModel",
+          "ModelName": "anomaly-detection-model-v2",
+          "InitialInstanceCount": 1,
+          "InstanceType": "ml.c5.large",
+          "InitialVariantWeight": 20
+        }
+      ]
+    }
+    ```
+    * CloudWatch metrics to compare performance by variant
+    * Automated rollback if new variant underperforms
+    * Progressive traffic shifting based on performance
 
-3. Scalability considerations:
-   - Horizontal scaling for cloud components
-   - Equipment-specific model instances
-   - Regional deployment for latency reduction
-   - Load balancing for prediction requests
+3.  **Scalability:** 
+    * Leverage managed AWS services with auto-scaling capabilities
+    * Serverless functions for event-driven components
+    * Distributed processing for batch operations
+    * Horizontal scaling for inference endpoints
+    * Containerize models (Docker) for portability (ECS/EKS or SageMaker)
+    * Instance rightsizing based on performance metrics
+    * Multi-region deployment for global operation
+    
+4.  **Cost Considerations:** 
+    * Balance edge vs. cloud processing (compute cost, data transfer cost)
+    * Use appropriate instance types (e.g., Inferentia for inference, Graviton instances for cost-efficiency)
+    * SageMaker Savings Plans for predictable workloads
+    * S3 Intelligent Tiering for automated storage cost optimization
+    * Reserved instances for predictable baseline capacity
+    * Lifecycle policies for data archival
+    * Spot instances for fault-tolerant training jobs
+    
+    **Cost Analysis Example:**
+    ```
+    Edge Processing (per FC):
+    - Greengrass Core devices: $500-1,000 per device x 5-10 devices = $2,500-10,000 initial investment
+    - Data processing costs: Minimal (local processing)
+    - Data transfer: ~100GB/month = ~$9/month egress
+    
+    Cloud Processing (100 FCs):
+    - S3 Storage: 5TB/month = ~$115/month
+    - SageMaker Endpoints: 5 ml.c5.xlarge instances = ~$1,200/month
+    - SageMaker Training: 500 hours/month = ~$1,500/month
+    - Kinesis: 100 shards = ~$1,200/month
+    - Other services (Lambda, Glue, etc.) = ~$1,000/month
+    
+    Estimated Monthly Cost: ~$5,000 for cloud + $900 for data transfer
+    Annual Cost: ~$71,000
+    
+    ROI Analysis:
+    - One prevented 4-hour downtime per FC per month = $200,000-400,000 savings
+    - Potential Annual Savings: $24-48M across 100 FCs
+    - ROI: 338x-676x
+    ```
 
-4. Operational patterns:
-   - Blue-green deployments for model updates
-   - Canary releases for new algorithms
-   - Circuit breakers for degraded operation
-   - Fallback to simpler models on edge failures
+5.  **Security & Compliance:**
+    * IAM roles with least privilege for all components
+    * VPC with network ACLs and security groups for isolation
+    * AWS KMS for encryption at rest and in transit
+    * AWS Shield for DDoS protection
+    * CloudTrail for audit logging
+    * Secrets Manager for credential management
+    * Compliance frameworks integration (ISO 27001, SOC 2)
+
+6.  **CI/CD Pipeline:**
+    * AWS CodePipeline for orchestration
+    * CodeBuild for automated testing and building
+    * CodeDeploy for coordinated deployments
+    * SageMaker Projects for MLOps pipelines
+    * Infrastructure as Code using CloudFormation or CDK
+    * Model approval workflows
+    
+    ```yaml
+    # Simplified CodePipeline structure for ML deployment
+    Pipeline:
+      Source:
+        Provider: GitHub
+        Repository: anomaly-detection-repo
+      
+      Build:
+        - TaskName: UnitTests
+          Command: "pytest tests/"
+        - TaskName: BuildContainer
+          Command: "docker build -t ${ECR_REPO}:${VERSION} ."
+      
+      Train:
+        - TaskName: DataPreprocessing
+          Command: "python scripts/preprocess.py"
+        - TaskName: ModelTraining
+          Command: "python scripts/train.py"
+        - TaskName: ModelEvaluation
+          Command: "python scripts/evaluate.py"
+      
+      Deploy:
+        - TaskName: DeployDev
+          Command: "python scripts/deploy.py --environment=dev"
+        - TaskName: QualityCheck
+          Command: "python scripts/quality_check.py"
+        - TaskName: ApprovalGate
+          Type: Manual
+        - TaskName: DeployProd
+          Command: "python scripts/deploy.py --environment=prod"
+    ```
 
 ### 5. Monitoring and Continuous Improvement
 
-**Monitoring Framework:**
+**Monitoring Framework (CloudWatch, SageMaker Model Monitor):**
 
-1. Model performance monitoring:
-   - Precision, recall tracking over time
-   - Prediction latency and throughput metrics
-   - Drift detection in input feature distributions
-   - Performance segmentation by equipment type
+1.  **Model Performance:**
+    *   Track prediction accuracy, precision/recall/F1, AUC, RUL error over time.
+    *   Monitor inference latency, throughput, error rates (endpoint metrics).
+    *   Detect drift:
+        *   *Data Drift:* Monitor input feature distributions (SageMaker Model Monitor).
+        *   *Concept Drift:* Monitor model prediction distribution and correlation with actual outcomes (requires feedback). Retrain/adapt model if performance degrades.
+    *   Segment performance by FC, equipment type, age.
+    *   SageMaker Model Monitor to automate drift detection.
+    *   Custom dashboards for model performance metrics.
 
-2. System health monitoring:
-   - Edge device connectivity and health checks
-   - Inference request success rates
-   - Resource utilization (CPU, memory, storage)
-   - Data pipeline completeness and freshness
+2.  **System Health:**
+    *   Monitor health of edge devices (Greengrass metrics, IoT Device Management).
+    *   Track data pipeline latency and completeness (CloudWatch metrics/alarms).
+    *   Monitor resource utilization (CPU, memory, network) for edge and cloud components.
+    *   Service quotas monitoring and proactive adjustment.
+    *   End-to-end latency tracking from sensor to inference.
+    *   Automated recovery procedures for component failures.
 
-3. Business impact tracking:
-   - False positive/negative rates with cost impact
-   - Maintenance effectiveness post-alert
-   - Time saved through preventive action
-   - Overall equipment effectiveness improvement
+3.  **Business Impact:**
+    *   Track false positive/negative rates and associate costs.
+    *   Measure reduction in unplanned downtime, maintenance costs.
+    *   Collect feedback from maintenance teams on alert usefulness (e.g., thumbs up/down).
+    *   Track Overall Equipment Effectiveness (OEE).
+    *   Cost attribution and ROI calculation by FC.
+    *   Create executive dashboards showing business value.
 
-**Continuous Learning Loop:**
+**Continuous Learning Loop (CI/CD/CT for ML):**
 
-1. Model retraining triggers:
-   - Scheduled retraining (weekly/monthly)
-   - Performance degradation detection
-   - Significant data distribution change
-   - New equipment types onboarded
+1.  **Retraining Triggers:**
+    *   Scheduled (e.g., weekly/monthly).
+    *   Performance degradation detected by monitoring.
+    *   Significant data/concept drift detected.
+    *   Availability of new labeled data (e.g., recent failures, technician feedback).
+    *   New equipment types or significant modifications.
+    
+    ```python
+    # Example CloudWatch Event rule for scheduled retraining
+    {
+        "source": ["aws.events"],
+        "detail-type": ["Scheduled Event"],
+        "detail": {
+            "resources": ["arn:aws:events:us-east-1:123456789012:rule/WeeklyRetraining"]
+        }
+    }
+    
+    # Example drift detection trigger
+    {
+        "source": ["aws.sagemaker"],
+        "detail-type": ["SageMaker Model Monitor Drift Detection"],
+        "detail": {
+            "monitoringScheduleArn": ["arn:aws:sagemaker:us-east-1:123456789012:monitoring-schedule/drift-monitor"],
+            "result": ["Drifted"]
+        }
+    }
+    ```
 
-2. Feedback incorporation:
-   - Maintenance technician feedback loop
-   - False positive annotation system
-   - Active learning for ambiguous cases
-   - Cross-facility knowledge sharing
+2.  **Feedback Incorporation:**
+    *   System for technicians to label alerts (True Positive/False Positive) and provide details (root cause, action taken). This creates new labeled data.
+    *   Use active learning to prioritize uncertain predictions for human review.
+    *   Capture maintenance outcomes and effectiveness.
+    *   Integration with work order systems for closed-loop validation.
+    *   Periodic model review sessions with domain experts.
 
-3. Model improvement process:
-   - Champion-challenger testing framework
-   - Shadow deployment for new models
-   - Performance buckets by equipment type/age
-   - Offline simulation with historical data
+3.  **Model Improvement Process:**
+    *   Automated retraining pipelines (e.g., SageMaker Pipelines).
+    *   Champion-challenger framework for evaluating new models against the currently deployed one using offline data and online A/B testing.
+    *   Regularly experiment with new features, architectures, and algorithms.
+    *   Automatic model promotion based on performance criteria.
+    *   Model versioning and lineage tracking.
+    *   Robust testing before deployment.
 
-4. Knowledge management:
-   - Failure mode database with model associations
-   - Transfer learning opportunity mapping
-   - Feature importance tracking and documentation
-   - Best practices repository across facilities
+4.  **Knowledge Management:** 
+    * Maintain a database linking detected anomaly patterns/features to confirmed failure modes and successful maintenance actions.
+    * Documentation of model versions and performance characteristics.
+    * Share learnings across facilities with similar equipment.
+    * Build a knowledge graph of equipment, failures, and solutions.
 
-### 6. Implementation Plan
+5.  **Explainability & Interpretability:**
+    * SageMaker Clarify for feature importance analysis
+    * SHAP values for local explanations
+    * Custom visualization tools for technicians
+    * Anomaly explanations in maintenance-friendly language
+    * Model cards documenting model behavior and limitations
 
-**Phase 1: Foundation (Months 1-3)**
-- Deploy sensor infrastructure for 5 pilot facilities
-- Build data pipelines and basic preprocessing
-- Implement simple statistical anomaly detection
-- Establish monitoring dashboard for maintenance teams
-- Collect feedback and refine alert thresholds
+### 6. Implementation Plan (Phased Rollout)
 
-**Phase 2: Enhancement (Months 4-6)**
-- Train advanced machine learning models on pilot data
-- Deploy edge computing infrastructure
-- Implement event classification for common failure modes
-- Create maintenance recommendation system
-- Expand to 25 additional facilities
+**Phase 1: Pilot (Months 1-4)**
+- Select 1-2 representative FCs based on data availability and business impact.
+- Deploy sensors on critical equipment types (highest impact on downtime).
+- Build core data pipeline (Ingestion, Storage, Basic Processing).
+- Develop & deploy baseline anomaly detection models (statistical, Isolation Forest) in the cloud.
+- Establish basic monitoring dashboard & alert mechanism (email/SMS).
+- Focus: Validate data quality, baseline performance, gather initial feedback.
+- Key milestone: First successful anomaly detection with 48+ hour advance warning.
+- Cost estimate: $150-200K for pilot infrastructure and development.
 
-**Phase 3: Scale (Months 7-12)**
-- Global rollout to all facilities
-- Implement transfer learning between equipment types
-- Deploy remaining useful life prediction models
-- Integrate with maintenance planning systems
-- Establish federated learning across regions
+**Phase 2: Enhance & Expand (Months 5-9)**
+- Roll out to 5-10 FCs, selected based on pilot learnings.
+- Implement advanced ML models (e.g., Autoencoders) trained on pilot data.
+- Deploy edge processing capabilities (Greengrass) for low-latency detection on critical alerts.
+- Develop anomaly classification/scoring models using initial feedback/labels.
+- Integrate with Feature Store.
+- Refine alerting & dashboarding based on feedback.
+- Implement initial CI/CD pipeline for model deployment.
+- Focus: Improve model accuracy, test edge deployment, build feedback loop.
+- Key milestone: Reduction in false positive rate to <10%, documented cost savings.
+- Cost estimate: $300-400K for expanded infrastructure and development.
 
-**Phase 4: Optimization (Months 13-18)**
-- Implement automated hyperparameter tuning
-- Optimize edge-cloud processing balance
-- Develop specialized models for critical equipment
-- Create simulation environment for what-if analysis
-- Establish fully automated continuous learning system
+**Phase 3: Scale & Integrate (Months 10-15)**
+- Wider rollout across targeted FCs/regions (25-50 FCs).
+- Implement transfer learning strategies for faster onboarding of new equipment/FCs.
+- Develop and deploy initial RUL models for selected components.
+- Integrate with maintenance planning systems (generate work order suggestions).
+- Establish automated retraining and deployment pipelines (CI/CD/CT).
+- Implement comprehensive security controls.
+- Focus: Scalability, automation, integration, demonstrating broader value.
+- Key milestone: Documented 20%+ reduction in unplanned downtime.
+- Cost estimate: $600-800K for scaled infrastructure and integration.
+
+**Phase 4: Optimize & Mature (Months 16+)**
+- Full global rollout to all FCs.
+- Optimize models (hyperparameters, architectures).
+- Implement advanced features (e.g., root cause analysis hints, maintenance optimization).
+- Refine edge-cloud workload balance for cost optimization.
+- Implement advanced security and compliance features.
+- Deploy multi-region architecture for resiliency.
+- Continuously monitor ROI and refine the system based on business impact.
+- Focus: Long-term value, efficiency, continuous improvement culture.
+- Key milestone: System becomes standard practice for FC maintenance globally with quantified ROI >10x.
+- Cost estimate: $1-1.5M annually for global operation.
+
+**Deployment Strategy by Phase:**
+
+| Phase | Infrastructure | Models | Integration | Operations |
+|-------|---------------|--------|-------------|------------|
+| Pilot | Cloud-first with minimal edge | Simple statistical and baseline ML | Standalone with manual alerts | Single team oversight |
+| Enhance | Hybrid with edge for critical systems | AE, Isolation Forest, basic sequence models | Basic API integration with existing systems | Specialized team per region |
+| Scale | Standardized edge-cloud pattern | Transfer learning, equipment-specific models | Bidirectional integration with work orders | Centralized management, local operations |
+| Mature | Optimized, resilient, multi-region | Ensemble approach, RUL prediction | Full ecosystem integration | Global standards, automated operations |
 
 ### 7. Evaluation Criteria
 
 **Technical Metrics:**
-- Anomaly detection precision/recall: Target >85% precision, >80% recall
-- Mean time to detection: Target 24-48 hours before failure
-- False positive rate: Target <5% of alerts
-- Inference latency: Target <100ms for edge models, <1s for cloud models
+- **Anomaly Detection:** Precision > 85%, Recall > 80% (tunable based on cost), PR-AUC > 0.90.
+- **Mean Time To Detection (MTTD):** Target > 24-72 hours before failure for detectable modes.
+- **False Positive Rate:** Target < 5% of alerts actioned (after initial tuning).
+- **Inference Latency:** Edge: < 100-500ms; Cloud: < 1s.
+- **RUL Prediction:** RMSE/MAE within X% of actual remaining life (e.g., 10-20%).
+- **Model Training Time:** < 4 hours for retraining on incremental data.
+- **Data Freshness:** < 5 minutes from sensor to feature store for real-time features.
 
 **Business Metrics:**
-- Reduction in unplanned downtime: Target 30% in Year 1
-- Maintenance cost reduction: Target 15% in Year 1
-- Return on investment: Target 300% over 3 years
-- Labor efficiency: Target 20% increase in maintenance team efficiency
+- **Unplanned Downtime Reduction:** Target 30% reduction in Year 1, 50%+ long term.
+- **Maintenance Cost Reduction:** Target 15% reduction (shift from reactive to predictive).
+- **Return on Investment (ROI):** Positive ROI within 18-24 months, target >10x long-term.
+- **Maintenance Team Efficiency:** Increase in proactive vs. reactive work ratio.
+- **Parts Inventory Optimization:** 10-15% reduction in emergency parts orders.
+- **Customer Impact:** Reduction in shipment delays due to equipment failures.
 
 **Operational Metrics:**
-- System availability: Target 99.9%
-- Data freshness: Target <5 minute delay
-- Model update cycle: Target weekly updates
-- Alert response time: Target <30 minutes for critical alerts
+- **System Availability:** > 99.9% for cloud components, > 99% for edge (considering potential hardware issues).
+- **Data Freshness:** End-to-end latency from sensor to insight < 5 minutes for real-time path.
+- **Model Retraining Frequency:** Weekly/Bi-weekly automated runs.
+- **Alert Acknowledgment Time:** < 30 minutes for critical alerts.
+- **Deployment Lead Time:** < 1 day from model approval to production.
+- **Recovery Time Objective:** < 1 hour for critical components.
+
+**Implementation Milestones:**
+- Phase 1: Successful pilot with measurable anomaly detection capability
+- Phase 2: 5+ FCs with <10% false positive rate, documented cost savings
+- Phase 3: 50+ FCs with 20%+ downtime reduction, maintenance system integration
+- Phase 4: Global deployment with consistent KPI achievement, automated operations
 
 ### 8. Challenges and Mitigations
 
 **Technical Challenges:**
-1. **Imbalanced data**: Most equipment operates normally
-   - Mitigation: Synthetic data generation, simulation, active learning
+1.  **Data Quality & Noise:** Sensors malfunction, drift, or are noisy.
+    *   Mitigation: Robust preprocessing, sensor fusion, automated data quality monitoring (e.g., Deequ, Glue DQ), anomaly detection *on sensor readings themselves*. Implement SageMaker Data Wrangler for data quality pipelines.
 
-2. **Hardware heterogeneity**: Different sensor types and configurations
-   - Mitigation: Feature normalization, transfer learning, equipment-specific adapters
+2.  **Imbalanced Data:** Failures are rare.
+    *   Mitigation: Anomaly detection focus (unsupervised), over/under-sampling (SMOTE), synthetic data generation (if feasible), cost-sensitive learning, focus on PR-AUC metric. Use SageMaker's built-in capabilities for handling imbalanced data.
 
-3. **Noisy sensor data**: Industrial environments have interference
-   - Mitigation: Robust preprocessing, sensor fusion, noise modeling
+3.  **Concept Drift:** Equipment behavior changes over time (wear, maintenance, operational changes).
+    *   Mitigation: Continuous monitoring, adaptive models, regular retraining, online learning components. Implement SageMaker Model Monitor for drift detection.
+
+4.  **Scalability & Heterogeneity:** Managing thousands of models for diverse equipment.
+    *   Mitigation: Transfer learning, multi-task learning, automated model training/deployment pipelines, standardized feature engineering where possible. Use SageMaker multi-model endpoints for efficient hosting.
+
+5.  **Edge-Cloud Reliability:** Connectivity issues between edge devices and cloud.
+    *   Mitigation: Robust offline capabilities on edge devices, local buffering, gradual synchronization when connectivity returns, fallback strategies for critical alerts.
 
 **Operational Challenges:**
-1. **Maintenance team adoption**: Resistance to ML-driven recommendations
-   - Mitigation: Explainable AI, clear confidence metrics, technician feedback loop
+1.  **Maintenance Team Adoption:** Resistance to change, lack of trust in "black box" models.
+    *   Mitigation: Explainable AI (XAI) techniques (SHAP, LIME) to explain predictions, clear communication of model confidence, involve technicians in feedback loop, start with recommendations not automated actions, demonstrate value with pilot projects.
 
-2. **Cost of false positives**: Unnecessary maintenance is expensive
-   - Mitigation: Tiered alert system, confidence thresholds, confirmation requirements
+2.  **Alert Fatigue:** Too many false positives overwhelm teams.
+    *   Mitigation: Careful threshold tuning (possibly dynamic), tiered alert system (Info, Low, Medium, High), anomaly scoring/ranking, root cause analysis hints, feedback mechanism to suppress repetitive false alarms.
 
-3. **Edge deployment limitations**: Compute constraints, connectivity issues
-   - Mitigation: Model quantization, fallback mechanisms, intermittent synchronization
+3.  **Integration with Existing Systems:** Legacy maintenance software.
+    *   Mitigation: Develop clear APIs, work with IT teams early, potentially use intermediate staging databases or middleware, leverage AWS AppFlow for SaaS integration.
+
+4.  **Security & Compliance:** Protecting sensitive operational data.
+    *   Mitigation: End-to-end encryption, VPC isolation, IAM role-based access, audit logging, compliance with industrial security standards, regular security reviews.
 
 **Organizational Challenges:**
-1. **Cross-facility standardization**: Different operational procedures
-   - Mitigation: Federated approach, local customization, best practices sharing
+1.  **Cross-functional Collaboration:** Requires coordination between Ops, Maintenance, Tech, Data Science.
+    *   Mitigation: Clear roles & responsibilities, dedicated project team, regular stakeholder meetings, shared goals and metrics, joint ownership of outcomes.
 
-2. **Data governance**: Ensuring consistent data quality across global operations
-   - Mitigation: Automated quality checks, data SLAs, centralized monitoring
+2.  **Data Governance & Access:** Ensuring consistent data handling and access across FCs.
+    *   Mitigation: Establish clear data standards, use centralized data lake/feature store, implement appropriate access controls (IAM), develop data sharing agreements between regions.
 
-3. **Knowledge retention**: Capturing tribal knowledge from experienced technicians
-   - Mitigation: Feedback systems, annotation tools, expert review processes
+3.  **Measuring ROI:** Attributing downtime reduction specifically to the ML system.
+    *   Mitigation: Careful baseline measurement before deployment, phased rollout with control groups (if possible), track specific failure modes targeted by the system, develop standardized ROI calculation methodology.
+
+4.  **Stakeholder Management:** Maintaining executive support through implementation phases.
+    *   Mitigation: Regular reporting on key metrics, clear communication of value delivered, showcase early wins, transparent reporting on challenges and solutions.
+
+**Mitigation Action Plan:**
+1. Form cross-functional tiger team with maintenance experts in Phase 1
+2. Deploy SageMaker Clarify for model explainability from initial rollout 
+3. Create data governance framework before expanding beyond pilot
+4. Establish security review board for quarterly assessments
+5. Develop ROI measurement framework with Finance team input
 
 ### 9. Future Directions
 
-**Advanced Analytics:**
-- Causal analysis for root cause determination
-- Digital twin integration for simulation-based predictions
-- Reinforcement learning for maintenance schedule optimization
-- Explainable AI for maintenance decision support
+*   **Enhanced Explainability:** Deeper integration of XAI for technician trust and faster diagnosis using SageMaker Clarify and custom visualization tools.
 
-**Integration Opportunities:**
-- Supply chain integration for parts availability
-- Labor planning integration for maintenance scheduling
-- Quality control correlation with equipment health
-- Energy efficiency optimization based on health metrics
+*   **Causal Inference:** Move beyond correlation to identify root causes of anomalies using causal modeling techniques and combining physics-based knowledge with data-driven insights.
 
-**Technology Evolution:**
-- Computer vision integration for visual inspection
-- Augmented reality for maintenance guidance
-- Autonomous maintenance robots for simple tasks
-- Blockchain for secure maintenance record verification
+*   **Prescriptive Maintenance:** Recommend specific optimal maintenance actions and timing using reinforcement learning or optimization models, potentially leveraging AWS Forecast for time-based predictions.
+
+*   **Digital Twin Integration:** Combine ML models with physics-based simulations for more accurate predictions and what-if analysis, leveraging AWS IoT TwinMaker for digital twin capabilities.
+
+*   **Computer Vision:** Use cameras for visual inspection (e.g., detecting leaks, wear, foreign objects) with Amazon Lookout for Vision or custom CV models deployed on edge devices.
+
+*   **Fleet Learning:** Improve models across the entire fleet by sharing insights/patterns learned at different FCs (potentially using Federated Learning if data sharing is restricted). Create a knowledge base of patterns across the global network.
+
+*   **Energy Efficiency:** Correlate equipment health with energy consumption for optimization, leveraging IoT SiteWise for energy monitoring and AWS Sustainability tools.
+
+*   **Voice Interfaces:** Natural language interfaces for maintenance technicians to query system status and predictions using Amazon Lex and Alexa for Business.
+
+*   **Augmented Reality:** Maintenance guidance using AR interfaces to overlay predictions and recommended actions on physical equipment.
+
+*   **Supply Chain Integration:** Connect predictive maintenance insights with parts inventory management and supplier networks to optimize parts availability.
+
+*   **Autonomous Maintenance:** For appropriate tasks, enable autonomous or semi-autonomous response to certain failure modes, such as automated speed reduction or load balancing.
 
 ### 10. Conclusion
 
-The proposed anomaly detection system offers a comprehensive solution for predictive maintenance across Amazon's fulfillment network. By combining edge and cloud processing, hierarchical modeling approaches, and continuous learning capabilities, the system can scale effectively while providing actionable insights to maintenance teams.
+This proposed end-to-end anomaly detection system provides a scalable and adaptable solution for predictive maintenance in Amazon's fulfillment centers. By leveraging a hybrid edge-cloud architecture with AWS services, employing a multi-stage modeling approach, and incorporating a robust monitoring and continuous improvement loop, the system can significantly reduce operational disruptions and maintenance costs.
 
-The implementation strategy balances immediate value delivery with long-term architectural goals, ensuring that the system can evolve as both the equipment and ML techniques advance. With proper integration into maintenance workflows and attention to the human factors of technology adoption, this system has the potential to significantly reduce downtime, extend equipment life, and improve operational efficiency across the global fulfillment network.
+The phased implementation plan allows for iterative development and value demonstration, with careful attention to both technical excellence and organizational adoption. Addressing technical, operational, and organizational challenges proactively, particularly regarding data quality and user adoption, will be key to the long-term success and impact of this system.
 
-The layered approach to model development—from simple statistical methods to advanced deep learning—provides robustness while enabling continuous improvement, making this a solution that can deliver value immediately while growing more powerful over time.
+The solution aligns with Amazon's operational excellence principles by:
+1. Anticipating failures before they impact operations
+2. Optimizing resource allocation for maintenance
+3. Scaling effectively across the global network
+4. Continuously improving through data-driven insights
+5. Providing measurable business impact with clear ROI
 
-### Appendix: Implementation Code Samples
-
-**Feature Extraction Pipeline:**
-
-```python
-def extract_time_domain_features(signal, window_size=120, step_size=60):
-    """Extract statistical features from time-domain signal"""
-    features = []
-    for i in range(0, len(signal) - window_size + 1, step_size):
-        window = signal[i:i+window_size]
-        
-        # Statistical moments
-        mean = np.mean(window)
-        std = np.std(window)
-        skew = scipy.stats.skew(window)
-        kurtosis = scipy.stats.kurtosis(window)
-        
-        # Percentiles
-        p10 = np.percentile(window, 10)
-        p50 = np.percentile(window, 50)
-        p90 = np.percentile(window, 90)
-        
-        # Rate of change
-        diff = np.diff(window)
-        mean_diff = np.mean(diff)
-        max_diff = np.max(np.abs(diff))
-        
-        # Peak metrics
-        peak_to_peak = np.max(window) - np.min(window)
-        crest_factor = np.max(np.abs(window)) / np.sqrt(np.mean(np.square(window)))
-        
-        # Combine features
-        window_features = [mean, std, skew, kurtosis, p10, p50, p90, 
-                          mean_diff, max_diff, peak_to_peak, crest_factor]
-        features.append(window_features)
-    
-    return np.array(features)
-
-def extract_frequency_domain_features(signal, fs=1000, window_size=120, step_size=60):
-    """Extract frequency-domain features from signal"""
-    features = []
-    for i in range(0, len(signal) - window_size + 1, step_size):
-        window = signal[i:i+window_size]
-        
-        # Apply Hanning window to reduce spectral leakage
-        window = window * np.hanning(len(window))
-        
-        # Compute FFT
-        fft = np.fft.rfft(window)
-        fft_magnitude = np.abs(fft)
-        
-        # Frequency values
-        freqs = np.fft.rfftfreq(window_size, 1/fs)
-        
-        # Compute power spectral density
-        psd = fft_magnitude ** 2 / (window_size * fs)
-        
-        # Extract features
-        dominant_freq = freqs[np.argmax(psd)]
-        spectral_centroid = np.sum(freqs * psd) / np.sum(psd)
-        spectral_spread = np.sqrt(np.sum(((freqs - spectral_centroid) ** 2) * psd) / np.sum(psd))
-        
-        # Energy in frequency bands (example: low, mid, high)
-        low_freq_idx = np.where(freqs <= 100)[0]
-        mid_freq_idx = np.where((freqs > 100) & (freqs <= 300))[0]
-        high_freq_idx = np.where(freqs > 300)[0]
-        
-        low_energy = np.sum(psd[low_freq_idx])
-        mid_energy = np.sum(psd[mid_freq_idx])
-        high_energy = np.sum(psd[high_freq_idx])
-        
-        # Combine features
-        window_features = [dominant_freq, spectral_centroid, spectral_spread,
-                          low_energy, mid_energy, high_energy]
-        features.append(window_features)
-    
-    return np.array(features)
-```
-
-**Anomaly Detection Service:**
-
-```python
-class AnomalyDetectionService:
-    def __init__(self, model_path, feature_config, threshold=3.0):
-        self.model = tf.keras.models.load_model(model_path)
-        self.feature_config = feature_config
-        self.threshold = threshold
-        self.feature_scaler = self._load_scaler()
-        self.anomaly_history = deque(maxlen=100)  # Store recent anomaly scores
-        
-    def _load_scaler(self):
-        # Load feature normalization parameters
-        with open(os.path.join(os.path.dirname(model_path), 'scaler.pkl'), 'rb') as f:
-            return pickle.load(f)
-    
-    def preprocess_data(self, sensor_data):
-        """Extract features and normalize"""
-        time_features = extract_time_domain_features(
-            sensor_data, 
-            window_size=self.feature_config['window_size'],
-            step_size=self.feature_config['step_size']
-        )
-        
-        freq_features = extract_frequency_domain_features(
-            sensor_data,
-            fs=self.feature_config['sampling_rate'],
-            window_size=self.feature_config['window_size'],
-            step_size=self.feature_config['step_size']
-        )
-        
-        # Combine feature sets
-        features = np.hstack([time_features, freq_features])
-        
-        # Normalize features
-        features_normalized = self.feature_scaler.transform(features)
-        
-        return features_normalized
-    
-    def detect_anomalies(self, sensor_data):
-        """Process sensor data and return anomaly scores"""
-        # Extract and normalize features
-        features = self.preprocess_data(sensor_data)
-        
-        # Create sequences for model input
-        sequence_length = self.feature_config['sequence_length']
-        sequences = []
-        
-        for i in range(len(features) - sequence_length + 1):
-            sequences.append(features[i:i+sequence_length])
-        
-        if not sequences:
-            return [], [], []
-        
-        sequences = np.array(sequences)
-        
-        # Generate reconstructions
-        reconstructions = self.model.predict(sequences)
-        
-        # Compute reconstruction error
-        mse = np.mean(np.square(sequences - reconstructions), axis=(1, 2))
-        
-        # Update anomaly history and compute dynamic threshold
-        self.anomaly_history.extend(mse)
-        dynamic_threshold = self.threshold * np.median(self.anomaly_history)
-        
-        # Generate anomaly scores
-        anomaly_scores = mse / np.std(self.anomaly_history) if np.std(self.anomaly_history) > 0 else mse
-        anomalies = anomaly_scores > dynamic_threshold
-        
-        return anomaly_scores, anomalies, dynamic_threshold
-    
-    def analyze_anomaly(self, sensor_data, anomaly_indices):
-        """Analyze detected anomalies to characterize them"""
-        if not len(anomaly_indices):
-            return []
-        
-        # Extract features for anomalous sequences
-        features = self.preprocess_data(sensor_data)
-        sequence_length = self.feature_config['sequence_length']
-        
-        anomaly_details = []
-        for idx in anomaly_indices:
-            # Get the anomalous sequence
-            if idx + sequence_length <= len(features):
-                sequence = features[idx:idx+sequence_length]
-                
-                # Get reconstruction
-                reconstruction = self.model.predict(np.expand_dims(sequence, axis=0))[0]
-                
-                # Calculate feature-wise error
-                feature_errors = np.mean(np.square(sequence - reconstruction), axis=0)
-                
-                # Find top contributing features
-                top_feature_indices = np.argsort(feature_errors)[-3:]  # Top 3 features
-                top_features = [self.feature_config['feature_names'][i] for i in top_feature_indices]
-                
-                # Characterize anomaly
-                anomaly_info = {
-                    'index': idx,
-                    'severity': float(np.max(feature_errors) / np.mean(feature_errors)),
-                    'top_contributing_features': top_features,
-                    'feature_errors': {self.feature_config['feature_names'][i]: float(feature_errors[i]) 
-                                     for i in top_feature_indices}
-                }
-                anomaly_details.append(anomaly_info)
-        
-        return anomaly_details
-```
-
-**Alert Management Service:**
-
-```python
-class AlertManager:
-    def __init__(self, config, notification_service):
-        self.config = config
-        self.notification_service = notification_service
-        self.alert_history = {}  # Track alerts by equipment_id
-        self.maintenance_system = MaintenanceSystem()
-        self.equipment_db = EquipmentDatabase()
-        
-    def process_anomalies(self, equipment_id, timestamp, anomaly_details):
-        """Process anomalies and generate alerts if needed"""
-        if not anomaly_details:
-            return []
-        
-        # Get equipment info
-        equipment_info = self.equipment_db.get_equipment_info(equipment_id)
-        
-        # Calculate alert severity based on anomaly severity and equipment criticality
-        alerts = []
-        for anomaly in anomaly_details:
-            # Calculate weighted severity
-            weighted_severity = anomaly['severity'] * equipment_info['criticality_factor']
-            
-            # Determine alert level
-            if weighted_severity >= self.config['high_severity_threshold']:
-                alert_level = 'HIGH'
-            elif weighted_severity >= self.config['medium_severity_threshold']:
-                alert_level = 'MEDIUM'
-            else:
-                alert_level = 'LOW'
-            
-            # Create alert object
-            alert = {
-                'equipment_id': equipment_id,
-                'equipment_name': equipment_info['name'],
-                'timestamp': timestamp,
-                'severity': alert_level,
-                'anomaly_score': anomaly['severity'],
-                'contributing_features': anomaly['top_contributing_features'],
-                'feature_details': anomaly['feature_errors'],
-                'alert_id': str(uuid.uuid4())
-            }
-            
-            # Check if similar alert was recently generated
-            should_generate = self._check_alert_throttling(equipment_id, alert)
-            
-            if should_generate:
-                # Generate alert
-                alerts.append(alert)
-                
-                # Save to alert history
-                if equipment_id not in self.alert_history:
-                    self.alert_history[equipment_id] = []
-                self.alert_history[equipment_id].append({
-                    'alert_id': alert['alert_id'],
-                    'timestamp': timestamp,
-                    'severity': alert_level,
-                    'features': alert['contributing_features']
-                })
-                
-                # Trigger notifications based on severity
-                self._send_notifications(alert)
-                
-                # Create maintenance recommendation
-                self._create_maintenance_task(alert)
-        
-        return alerts
-    
-    def _check_alert_throttling(self, equipment_id, new_alert):
-        """Check if similar alert was recently generated to prevent alert fatigue"""
-        if equipment_id not in self.alert_history:
-            return True
-        
-        # Get recent alerts for this equipment
-        recent_alerts = [a for a in self.alert_history[equipment_id] 
-                       if (datetime.now() - a['timestamp']).total_seconds() < self.config['alert_throttling_window']]
-        
-        # Check for similar alerts (same features and severity)
-        for alert in recent_alerts:
-            if (alert['severity'] == new_alert['severity'] and
-                set(alert['features']) == set(new_alert['contributing_features'])):
-                return False
-        
-        return True
-    
-    def _send_notifications(self, alert):
-        """Send notifications based on alert severity"""
-        # Determine recipients based on severity and equipment
-        recipients = self._get_alert_recipients(alert)
-        
-        # Create notification message
-        message = self._format_alert_message(alert)
-        
-        # Send via appropriate channels based on severity
-        if alert['severity'] == 'HIGH':
-            self.notification_service.send_urgent(recipients, message, alert)
-        elif alert['severity'] == 'MEDIUM':
-            self.notification_service.send_standard(recipients, message, alert)
-        else:
-            self.notification_service.send_info(recipients, message, alert)
-    
-    def _create_maintenance_task(self, alert):
-        """Create maintenance task based on alert"""
-        # Get recommended maintenance actions for these features
-        maintenance_actions = self._get_recommended_actions(
-            alert['equipment_id'], 
-            alert['contributing_features']
-        )
-        
-        # Estimate priority and time required
-        priority = self._map_severity_to_priority(alert['severity'])
-        estimated_time = sum([action['estimated_time'] for action in maintenance_actions])
-        
-        # Create maintenance task
-        task = {
-            'alert_id': alert['alert_id'],
-            'equipment_id': alert['equipment_id'],
-            'priority': priority,
-            'recommended_actions': maintenance_actions,
-            'estimated_time': estimated_time,
-            'deadline': self._calculate_deadline(alert['severity'], estimated_time)
-        }
-        
-        # Submit to maintenance system
-        self.maintenance_system.create_task(task)
-        
-        return task
-    
-    def _get_recommended_actions(self, equipment_id, features):
-        """Get recommended maintenance actions based on anomalous features"""
-        equipment_type = self.equipment_db.get_equipment_type(equipment_id)
-        
-        # Query maintenance knowledge base
-        actions = []
-        for feature in features:
-            feature_actions = self.maintenance_system.get_recommended_actions(
-                equipment_type, feature
-            )
-            actions.extend(feature_actions)
-        
-        # Remove duplicates
-        unique_actions = []
-        action_ids = set()
-        for action in actions:
-            if action['action_id'] not in action_ids:
-                unique_actions.append(action)
-                action_ids.add(action['action_id'])
-        
-        return unique_actions
-```
-
-**Deployment on Edge:**
-
-```python
-class EdgeAnomalyDetector:
-    def __init__(self, config_path):
-        """Initialize edge detector with configuration"""
-        with open(config_path, 'r') as f:
-            self.config = json.load(f)
-        
-        # Load models
-        self.models = {}
-        self._load_models()
-        
-        # Initialize sensor interface
-        self.sensor_interface = SensorInterface(self.config['sensor_config'])
-        
-        # Initialize storage for local buffering
-        self.buffer_storage = LocalBuffer(self.config['buffer_config'])
-        
-        # Cloud synchronization client
-        self.cloud_client = CloudSyncClient(self.config['cloud_config'])
-        
-        # Alert manager for local alerts
-        self.alert_manager = EdgeAlertManager(self.config['alert_config'])
-        
-        # Processing state
-        self.is_running = False
-        self.processing_thread = None
-    
-    def _load_models(self):
-        """Load ML models for edge inference"""
-        model_dir = self.config['model_dir']
-        
-        # Load equipment-specific models
-        for equipment in self.config['equipment']:
-            equipment_id = equipment['id']
-            model_path = os.path.join(model_dir, f"{equipment_id}_model.onnx")
-            
-            if os.path.exists(model_path):
-                # Load with ONNX Runtime for optimal performance
-                self.models[equipment_id] = ort.InferenceSession(
-                    model_path, 
-                    providers=['CPUExecutionProvider']
-                )
-    
-    def start(self):
-        """Start anomaly detection processing"""
-        if self.is_running:
-            return
-        
-        self.is_running = True
-        self.processing_thread = threading.Thread(target=self._processing_loop)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-        
-        logger.info("Edge anomaly detector started")
-    
-    def stop(self):
-        """Stop anomaly detection processing"""
-        self.is_running = False
-        if self.processing_thread:
-            self.processing_thread.join(timeout=5.0)
-        
-        logger.info("Edge anomaly detector stopped")
-    
-    def _processing_loop(self):
-        """Main processing loop for anomaly detection"""
-        while self.is_running:
-            try:
-                # Collect sensor data
-                sensor_data = self.sensor_interface.read_sensors()
-                
-                # Process each equipment
-                for equipment in self.config['equipment']:
-                    equipment_id = equipment['id']
-                    
-                    # Get sensors for this equipment
-                    equipment_sensors = equipment['sensors']
-                    equipment_data = {s: sensor_data[s] for s in equipment_sensors if s in sensor_data}
-                    
-                    if not equipment_data:
-                        continue
-                    
-                    # Detect anomalies
-                    anomalies = self._detect_anomalies(equipment_id, equipment_data)
-                    
-                    # Buffer data for cloud sync
-                    self._buffer_data(equipment_id, sensor_data, anomalies)
-                    
-                    # Handle any detected anomalies
-                    if anomalies['has_anomalies']:
-                        self._handle_anomalies(equipment_id, anomalies)
-                
-                # Attempt to sync with cloud if connection available
-                self._sync_with_cloud()
-                
-                # Sleep before next processing cycle
-                time.sleep(self.config['processing_interval'])
-                
-            except Exception as e:
-                logger.error(f"Error in processing loop: {str(e)}")
-                time.sleep(5)  # Wait before retry
-    
-    def _detect_anomalies(self, equipment_id, sensor_data):
-        """Detect anomalies for specific equipment"""
-        # Prepare result structure
-        result = {
-            'timestamp': datetime.now().isoformat(),
-            'equipment_id': equipment_id,
-            'has_anomalies': False,
-            'anomaly_details': [],
-            'processing_latency': 0
-        }
-        
-        # Skip if no model available
-        if equipment_id not in self.models:
-            return result
-        
-        start_time = time.time()
-        
-        try:
-            # Preprocess sensor data
-            features = self._preprocess_data(equipment_id, sensor_data)
-            
-            # Run inference with ONNX model
-            model_inputs = {
-                self.models[equipment_id].get_inputs()[0].name: features
-            }
-            
-            # Get model outputs (reconstruction and anomaly scores)
-            outputs = self.models[equipment_id].run(None, model_inputs)
-            
-            # Process results based on model output format
-            # (This will vary based on model architecture)
-            reconstructions = outputs[0]
-            anomaly_scores = outputs[1] if len(outputs) > 1 else None
-            
-            # Calculate anomaly threshold
-            threshold = self.config['equipment_thresholds'].get(
-                equipment_id, 
-                self.config['default_threshold']
-            )
-            
-            # Determine anomalies
-            if anomaly_scores is None:
-                # Calculate reconstruction error
-                mse = np.mean(np.square(features - reconstructions), axis=1)
-                anomaly_scores = mse / np.mean(mse) if np.mean(mse) > 0 else mse
-            
-            # Identify anomalous points
-            anomalies = anomaly_scores > threshold
-            
-            if np.any(anomalies):
-                result['has_anomalies'] = True
-                
-                # Get details for anomalous points
-                anomaly_indices = np.where(anomalies)[0]
-                for idx in anomaly_indices:
-                    result['anomaly_details'].append({
-                        'index': int(idx),
-                        'score': float(anomaly_scores[idx]),
-                        'threshold': float(threshold),
-                        'timestamp': (datetime.now() - timedelta(
-                            seconds=(len(anomaly_scores) - idx) * 
-                            self.config['processing_interval']
-                        )).isoformat()
-                    })
-        
-        except Exception as e:
-            logger.error(f"Error detecting anomalies for equipment {equipment_id}: {str(e)}")
-        
-        # Calculate processing latency
-        result['processing_latency'] = time.time() - start_time
-        
-        return result
-    
-    def _buffer_data(self, equipment_id, sensor_data, anomalies):
-        """Buffer data for cloud synchronization"""
-        # Prepare data package
-        data_package = {
-            'equipment_id': equipment_id,
-            'timestamp': datetime.now().isoformat(),
-            'sensor_data': sensor_data,
-            'anomalies': anomalies,
-            'edge_device_id': self.config['edge_device_id']
-        }
-        
-        # Add to local buffer
-        self.buffer_storage.add(data_package)
-    
-    def _handle_anomalies(self, equipment_id, anomalies):
-        """Handle detected anomalies"""
-        # Generate local alerts if configured
-        if self.config['generate_local_alerts']:
-            for anomaly in anomalies['anomaly_details']:
-                self.alert_manager.create_alert(equipment_id, anomaly)
-        
-        # Attempt immediate cloud sync for anomalies
-        if self.config['expedite_anomaly_sync']:
-            try:
-                self.cloud_client.sync_anomalies(anomalies)
-            except Exception as e:
-                logger.warning(f"Failed to expedite anomaly sync: {str(e)}")
-    
-    def _sync_with_cloud(self):
-        """Synchronize data with cloud"""
-        # Check connection status
-        if not self.cloud_client.is_connected():
-            if not self.cloud_client.connect():
-                return
-        
-        try:
-            # Get buffered data packages
-            data_packages = self.buffer_storage.get_pending_packages(
-                limit=self.config['max_sync_packages']
-            )
-            
-            if not data_packages:
-                return
-            
-            # Send to cloud
-            sync_result = self.cloud_client.sync_data(data_packages)
-            
-            # Mark as synced if successful
-            if sync_result['success']:
-                package_ids = [p['id'] for p in data_packages]
-                self.buffer_storage.mark_synced(package_ids)
-        
-        except Exception as e:
-            logger.error(f"Error syncing with cloud: {str(e)}")
-```
-
-**Maintenance Optimization Service:**
-
-```python
-class MaintenanceOptimizer:
-    def __init__(self, config):
-        self.config = config
-        self.equipment_db = EquipmentDatabase()
-        self.maintenance_history = MaintenanceHistoryDB()
-        self.scheduler = MaintenanceScheduler()
-        
-    def optimize_maintenance_plan(self, facility_id, time_horizon_days=7):
-        """Generate optimized maintenance plan for facility"""
-        # Get all pending maintenance tasks
-        pending_tasks = self.scheduler.get_pending_tasks(facility_id)
-        
-        # Get equipment details
-        equipment_ids = set(task['equipment_id'] for task in pending_tasks)
-        equipment_details = {equip_id: self.equipment_db.get_equipment_details(equip_id)
-                           for equip_id in equipment_ids}
-        
-        # Get available maintenance technicians and their skills
-        technicians = self.scheduler.get_available_technicians(facility_id, time_horizon_days)
-        
-        # Define optimization constraints
-        constraints = {
-            'equipment_downtime_rules': self._get_equipment_downtime_rules(facility_id),
-            'technician_availability': self._get_technician_availability(technicians),
-            'part_availability': self._get_parts_availability(pending_tasks),
-            'priority_rules': self.config['priority_rules']
-        }
-        
-        # Group tasks that should be performed together
-        task_groups = self._group_related_tasks(pending_tasks, equipment_details)
-        
-        # Solve optimization problem
-        optimized_schedule = self._solve_maintenance_optimization(
-            task_groups, constraints, time_horizon_days
-        )
-        
-        # Generate final schedule with technician assignments
-        final_schedule = self._assign_technicians(optimized_schedule, technicians)
-        
-        return final_schedule
-    
-    def _group_related_tasks(self, tasks, equipment_details):
-        """Group tasks that should be performed together"""
-        # Initialize groups with individual tasks
-        groups = [{
-            'group_id': str(uuid.uuid4()),
-            'tasks': [task],
-            'total_duration': task['estimated_duration'],
-            'equipment_ids': [task['equipment_id']],
-            'max_priority': task['priority']
-        } for task in tasks]
-        
-        # Identify related tasks based on equipment proximity and similar maintenance types
-        merged_groups = []
-        used_task_ids = set()
-        
-        for i, group1 in enumerate(groups):
-            # Skip if this group was already merged
-            if any(task['task_id'] in used_task_ids for task in group1['tasks']):
-                continue
-            
-            current_group = copy.deepcopy(group1)
-            
-            for j, group2 in enumerate(groups):
-                if i == j:
-                    continue
-                
-                # Skip if this group was already merged
-                if any(task['task_id'] in used_task_ids for task in group2['tasks']):
-                    continue
-                
-                # Check if groups should be merged
-                if self._should_merge_groups(current_group, group2, equipment_details):
-                    # Merge groups
-                    for task in group2['tasks']:
-                        current_group['tasks'].append(task)
-                        used_task_ids.add(task['task_id'])
-                    
-                    # Update group properties
-                    current_group['total_duration'] += group2['total_duration']
-                    current_group['equipment_ids'].extend(group2['equipment_ids'])
-                    current_group['equipment_ids'] = list(set(current_group['equipment_ids']))
-                    current_group['max_priority'] = max(
-                        current_group['max_priority'], group2['max_priority']
-                    )
-            
-            # Add all tasks in this group to used list
-            for task in current_group['tasks']:
-                used_task_ids.add(task['task_id'])
-            
-            merged_groups.append(current_group)
-        
-        return merged_groups
-    
-    def _should_merge_groups(self, group1, group2, equipment_details):
-        """Determine if two task groups should be merged"""
-        # Check equipment proximity
-        equipment1 = [equipment_details[eq_id] for eq_id in group1['equipment_ids']]
-        equipment2 = [equipment_details[eq_id] for eq_id in group2['equipment_ids']]
-        
-        # Calculate equipment proximity score
-        proximity_scores = []
-        for eq1 in equipment1:
-            for eq2 in equipment2:
-                # Calculate physical distance or logical proximity
-                if eq1['zone'] == eq2['zone']:
-                    proximity_scores.append(1.0)  # Same zone
-                elif eq1['area'] == eq2['area']:
-                    proximity_scores.append(0.5)  # Same area, different zone
-                else:
-                    proximity_scores.append(0.0)  # Different areas
-        
-        avg_proximity = sum(proximity_scores) / len(proximity_scores) if proximity_scores else 0
-        
-        # Check maintenance type similarity
-        maintenance_types1 = [task['maintenance_type'] for task in group1['tasks']]
-        maintenance_types2 = [task['maintenance_type'] for task in group2['tasks']]
-        
-        common_types = set(maintenance_types1) & set(maintenance_types2)
-        type_similarity = len(common_types) / max(len(set(maintenance_types1)), len(set(maintenance_types2)))
-        
-        # Check technician skill requirements
-        skills1 = set()
-        for task in group1['tasks']:
-            skills1.update(task.get('required_skills', []))
-        
-        skills2 = set()
-        for task in group2['tasks']:
-            skills2.update(task.get('required_skills', []))
-        
-        skill_overlap = len(skills1 & skills2) / max(len(skills1), len(skills2)) if skills1 and skills2 else 0
-        
-        # Combined score for merging decision
-        merge_score = (
-            self.config['proximity_weight'] * avg_proximity +
-            self.config['type_similarity_weight'] * type_similarity +
-            self.config['skill_overlap_weight'] * skill_overlap
-        )
-        
-        return merge_score >= self.config['merge_threshold']
-    
-    def _solve_maintenance_optimization(self, task_groups, constraints, time_horizon_days):
-        """Solve the maintenance scheduling optimization problem"""
-        # Define time slots for scheduling (e.g., hourly slots for the time horizon)
-        time_slots = time_horizon_days * 24
-        
-        # Create model
-        model = pulp.LpProblem("MaintenanceScheduling", pulp.LpMaximize)
-        
-        # Decision variables: x[g][t] = 1 if group g starts at time t
-        x = {}
-        for i, group in enumerate(task_groups):
-            for t in range(time_slots - math.ceil(group['total_duration'])):
-                x[i, t] = pulp.LpVariable(f"x_{i}_{t}", cat='Binary')
-        
-        # Objective function: maximize weighted sum of priorities and earliness
-        objective = pulp.lpSum([
-            group['max_priority'] * x[i, t] * (time_slots - t) / time_slots
-            for i, group in enumerate(task_groups)
-            for t in range(time_slots - math.ceil(group['total_duration']))
-        ])
-        
-        model += objective
-        
-        # Constraint: Each task group must be scheduled exactly once
-        for i in range(len(task_groups)):
-            model += pulp.lpSum([
-                x[i, t] for t in range(time_slots - math.ceil(task_groups[i]['total_duration']))
-            ]) == 1
-        
-        # Constraint: Equipment downtime rules (no overlapping maintenance for same equipment)
-        for eq_id in set(sum([group['equipment_ids'] for group in task_groups], [])):
-            # For each time slot
-            for t in range(time_slots):
-                # Sum of all tasks that would have this equipment under maintenance at time t
-                equipment_usage = pulp.lpSum([
-                    x[i, start_t]
-                    for i, group in enumerate(task_groups)
-                    if eq_id in group['equipment_ids']
-                    for start_t in range(max(0, t - math.ceil(group['total_duration']) + 1), t + 1)
-                    if start_t < time_slots - math.ceil(group['total_duration'])
-                ])
-                
-                # Equipment can only be under maintenance once at any time
-                model += equipment_usage <= 1
-        
-        # Constraint: Technician availability
-        technician_limits = constraints['technician_availability']
-        for t in range(time_slots):
-            # Sum of technician requirements at time t
-            technician_needs = pulp.lpSum([
-                group['tasks'][0].get('required_technicians', 1) * x[i, start_t]
-                for i, group in enumerate(task_groups)
-                for start_t in range(max(0, t - math.ceil(group['total_duration']) + 1), t + 1)
-                if start_t < time_slots - math.ceil(group['total_duration'])
-            ])
-            
-            # Cannot exceed available technicians
-            available_techs = technician_limits.get(t, 0)
-            model += technician_needs <= available_techs
-        
-        # Constraint: Parts availability
-        parts_availability = constraints['part_availability']
-        for part_id, available_qty in parts_availability.items():
-            # Sum of part usage across all scheduled tasks
-            part_usage = pulp.lpSum([
-                sum(task.get('required_parts', {}).get(part_id, 0) for task in group['tasks']) * x[i, t]
-                for i, group in enumerate(task_groups)
-                for t in range(time_slots - math.ceil(group['total_duration']))
-            ])
-            
-            # Cannot exceed available parts
-            model += part_usage <= available_qty
-        
-        # Solve the model
-        model.solve(pulp.PULP_CBC_CMD(msg=False))
-        
-        # Extract solution
-        if pulp.LpStatus[model.status] == 'Optimal':
-            schedule = []
-            
-            for i, group in enumerate(task_groups):
-                for t in range(time_slots - math.ceil(group['total_duration'])):
-                    if pulp.value(x[i, t]) == 1:
-                        # Convert time slot to actual date/time
-                        start_time = datetime.now() + timedelta(hours=t)
-                        end_time = start_time + timedelta(hours=group['total_duration'])
-                        
-                        schedule.append({
-                            'group_id': group['group_id'],
-                            'tasks': group['tasks'],
-                            'start_time': start_time.isoformat(),
-                            'end_time': end_time.isoformat(),
-                            'duration_hours': group['total_duration'],
-                            'equipment_ids': group['equipment_ids'],
-                            'priority': group['max_priority']
-                        })
-            
-            return schedule
-        else:
-            # No optimal solution found, create backup schedule
-            return self._create_backup_schedule(task_groups)
-    
-    def _assign_technicians(self, schedule, technicians):
-        """Assign technicians to maintenance tasks based on skills and availability"""
-        # Sort technicians by skill level
-        sorted_technicians = sorted(
-            technicians, 
-            key=lambda t: len(t['skills']), 
-            reverse=True
-        )
-        
-        # For each scheduled maintenance group
-        for group in schedule:
-            # Get required skills for all tasks
-            required_skills = set()
-            for task in group['tasks']:
-                required_skills.update(task.get('required_skills', []))
-            
-            # Find suitable technicians
-            assigned_technicians = []
-            remaining_skills = set(required_skills)
-            
-            # First, find technicians with specialized skills
-            for tech in sorted_technicians:
-                # Skip if technician already assigned or unavailable
-                if tech['id'] in [t['id'] for t in assigned_technicians]:
-                    continue
-                
-                if not self._is_technician_available(tech, group['start_time'], group['end_time']):
-                    continue
-                
-                # Check if technician has any of the remaining required skills
-                tech_skills = set(tech['skills'])
-                matching_skills = tech_skills & remaining_skills
-                
-                if matching_skills:
-                    assigned_technicians.append(tech)
-                    remaining_skills -= matching_skills
-                    
-                    # Break if all skills covered
-                    if not remaining_skills:
-                        break
-            
-            # If still need more technicians for general work
-            needed_techs = max(1, sum(task.get('required_technicians', 1) for task in group['tasks']))
-            
-            if len(assigned_technicians) < needed_techs:
-                # Add general technicians
-                for tech in sorted_technicians:
-                    # Skip if technician already assigned or unavailable
-                    if tech['id'] in [t['id'] for t in assigned_technicians]:
-                        continue
-                    
-                    if not self._is_technician_available(tech, group['start_time'], group['end_time']):
-                        continue
-                    
-                    assigned_technicians.append(tech)
-                    
-                    if len(assigned_technicians) >= needed_techs:
-                        break
-            
-            # Update schedule with technician assignments
-            group['assigned_technicians'] = [
-                {
-                    'id': tech['id'],
-                    'name': tech['name'],
-                    'skills': tech['skills']
-                }
-                for tech in assigned_technicians
-            ]
-            
-            # Mark these technicians as busy during this time
-            for tech in assigned_technicians:
-                self._mark_technician_busy(
-                    tech, 
-                    group['start_time'], 
-                    group['end_time'], 
-                    group['group_id']
-                )
-        
-        return schedule
-```
+When fully implemented, this system will transform maintenance operations from reactive to predictive, creating significant value for Amazon's fulfillment network and ultimately supporting the company's customer-centric mission by ensuring reliable and timely order fulfillment.
